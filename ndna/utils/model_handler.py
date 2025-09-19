@@ -22,6 +22,7 @@ class ModelHandler:
     SUPPORTED_ARCHITECTURES = {
         'gpt2': ['transformer', 'h', 'ln_f', 'lm_head'],
         'llama': ['model', 'layers', 'norm', 'lm_head'], 
+        'phi': ['model', 'layers', 'final_layernorm', 'lm_head'],  # Microsoft Phi models
         'bert': ['bert', 'encoder', 'layer', None],  # No lm_head for base BERT
         'roberta': ['roberta', 'encoder', 'layer', None],
         't5': ['encoder', 'block', 'final_layer_norm', 'lm_head'],
@@ -92,6 +93,8 @@ class ModelHandler:
             self.architecture = 'gpt2'
         elif 'llama' in model_class:
             self.architecture = 'llama'
+        elif 'phi' in model_class:
+            self.architecture = 'phi'
         elif 'bert' in model_class and 'roberta' not in model_class:
             self.architecture = 'bert'
         elif 'roberta' in model_class:
@@ -103,7 +106,13 @@ class ModelHandler:
             if hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
                 self.architecture = 'gpt2'
             elif hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-                self.architecture = 'llama'
+                # Check if it's Phi or Llama based on normalization layer
+                if hasattr(self.model.model, 'final_layernorm'):
+                    self.architecture = 'phi'
+                elif hasattr(self.model.model, 'norm'):
+                    self.architecture = 'llama'
+                else:
+                    self.architecture = 'llama'  # Default to llama for similar structures
             else:
                 warnings.warn(f"Unknown architecture for {model_class}. Attempting generic handling.")
                 self.architecture = 'generic'
@@ -112,7 +121,7 @@ class ModelHandler:
         """Get list of transformer blocks/layers."""
         if self.architecture == 'gpt2':
             return list(self.model.transformer.h)
-        elif self.architecture == 'llama':
+        elif self.architecture in ['llama', 'phi']:
             return list(self.model.model.layers)
         elif self.architecture in ['bert', 'roberta']:
             encoder = getattr(self.model, self.architecture)
@@ -137,6 +146,8 @@ class ModelHandler:
             return self.model.transformer.ln_f
         elif self.architecture == 'llama':
             return self.model.model.norm
+        elif self.architecture == 'phi':
+            return self.model.model.final_layernorm
         elif self.architecture == 't5':
             return self.model.encoder.final_layer_norm
         elif self.architecture in ['bert', 'roberta']:
@@ -158,8 +169,8 @@ class ModelHandler:
         """Get word and position embeddings."""
         if self.architecture == 'gpt2':
             return self.model.transformer.wte, self.model.transformer.wpe
-        elif self.architecture == 'llama':
-            return self.model.model.embed_tokens, None  # Llama uses RoPE, no learned pos embeddings
+        elif self.architecture in ['llama', 'phi']:
+            return self.model.model.embed_tokens, None  # Llama/Phi use RoPE, no learned pos embeddings
         elif self.architecture in ['bert', 'roberta']:
             base_model = getattr(self.model, self.architecture)
             return base_model.embeddings.word_embeddings, base_model.embeddings.position_embeddings

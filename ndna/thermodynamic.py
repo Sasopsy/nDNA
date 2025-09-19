@@ -91,19 +91,20 @@ class ThermodynamicCalculator:
             B, S = input_ids.shape
             
             # Build initial embeddings
-            with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu", 
-                               dtype=self.amp_dtype, enabled=(self.device == "cuda")):
-                # Get embeddings
-                wte, wpe = self.model_handler.get_embeddings()
-                h = wte(input_ids)
-                
-                if wpe is not None:
-                    pos_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
-                    h = h + wpe(pos_ids)
-                
-                # Apply dropout if available
-                if hasattr(transformer, 'drop'):
-                    h = transformer.drop(h)
+            # Disable autocast temporarily to debug
+            # with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu", 
+            #                    dtype=self.amp_dtype, enabled=(self.device == "cuda")):
+            # Get embeddings
+            wte, wpe = self.model_handler.get_embeddings()
+            h = wte(input_ids)
+            
+            if wpe is not None:
+                pos_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
+                h = h + wpe(pos_ids)
+            
+            # Apply dropout if available
+            if hasattr(transformer, 'drop'):
+                h = transformer.drop(h)
             
             # Per-layer losses
             per_layer_losses = []
@@ -111,27 +112,50 @@ class ThermodynamicCalculator:
             for ell in range(self.num_layers):
                 h_prev = h.detach()  # Isolate gradients to current block
                 
-                with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu",
-                                   dtype=self.amp_dtype, enabled=(self.device == "cuda")):
-                    # Forward through one block
-                    block_output = self.transformer_blocks[ell](h_prev)
-                    h_ell = block_output[0] if isinstance(block_output, tuple) else block_output
+                # Disable autocast temporarily to debug
+                # with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu",
+                #                    dtype=self.amp_dtype, enabled=(self.device == "cuda")):
+                # Forward through one block with proper arguments for different architectures
+                if self.model_handler.architecture in ['llama', 'phi']:
+                    # Llama/Phi models need position_embeddings (RoPE)
+                    position_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
                     
-                    # Apply logit lens: final_ln + lm_head
-                    if self.final_ln is not None:
-                        h_normed = self.final_ln(h_ell)
+                    # Get RoPE embeddings from the model
+                    if hasattr(self.model_handler.model.model, 'rotary_emb'):
+                        rotary_emb = self.model_handler.model.model.rotary_emb
+                        cos, sin = rotary_emb(h_prev, position_ids)
+                        position_embeddings = (cos, sin)
                     else:
-                        h_normed = h_ell
+                        position_embeddings = None
                     
-                    logits_ell = self.lm_head(h_normed)
-                    
-                    # Cross-entropy loss for next-token prediction
-                    loss_ell = F.cross_entropy(
-                        logits_ell.view(-1, logits_ell.size(-1)),
-                        labels.view(-1),
-                        ignore_index=-100,
-                        reduction="mean"
+                    block_output = self.transformer_blocks[ell](
+                        h_prev,
+                        attention_mask=None,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                        use_cache=False
                     )
+                else:
+                    # GPT-2 style models
+                    block_output = self.transformer_blocks[ell](h_prev)
+                
+                h_ell = block_output[0] if isinstance(block_output, tuple) else block_output
+                
+                # Apply logit lens: final_ln + lm_head
+                if self.final_ln is not None:
+                    h_normed = self.final_ln(h_ell)
+                else:
+                    h_normed = h_ell
+                
+                logits_ell = self.lm_head(h_normed)
+                
+                # Cross-entropy loss for next-token prediction
+                loss_ell = F.cross_entropy(
+                    logits_ell.view(-1, logits_ell.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                    reduction="mean"
+                )
                 
                 per_layer_losses.append(loss_ell)
                 h = h_ell  # Update hidden state for next layer
@@ -225,23 +249,46 @@ class ThermodynamicCalculator:
             B, S = input_ids.shape
             
             # Build initial embeddings
-            with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu",
-                               dtype=self.amp_dtype, enabled=(self.device == "cuda")):
-                wte, wpe = self.model_handler.get_embeddings()
-                h = wte(input_ids)
-                
-                if wpe is not None:
-                    pos_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
-                    h = h + wpe(pos_ids)
-                
-                if hasattr(transformer, 'drop'):
-                    h = transformer.drop(h)
+            # Disable autocast temporarily to debug
+            # with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu",
+            #                    dtype=self.amp_dtype, enabled=(self.device == "cuda")):
+            wte, wpe = self.model_handler.get_embeddings()
+            h = wte(input_ids)
+            
+            if wpe is not None:
+                pos_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
+                h = h + wpe(pos_ids)
+            
+            if hasattr(transformer, 'drop'):
+                h = transformer.drop(h)
             
             logp_prev = None
             
             for ell in range(self.num_layers):
-                # Forward through current layer
-                block_output = self.transformer_blocks[ell](h)
+                # Forward through current layer with proper arguments for different architectures
+                if self.model_handler.architecture in ['llama', 'phi']:
+                    # Llama/Phi models need position_embeddings (RoPE)
+                    position_ids = torch.arange(S, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, S)
+                    
+                    # Get RoPE embeddings from the model
+                    if hasattr(self.model_handler.model.model, 'rotary_emb'):
+                        rotary_emb = self.model_handler.model.model.rotary_emb
+                        cos, sin = rotary_emb(h, position_ids)
+                        position_embeddings = (cos, sin)
+                    else:
+                        position_embeddings = None
+                    
+                    block_output = self.transformer_blocks[ell](
+                        h,
+                        attention_mask=None,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                        use_cache=False
+                    )
+                else:
+                    # GPT-2 style models
+                    block_output = self.transformer_blocks[ell](h)
+                
                 h = block_output[0] if isinstance(block_output, tuple) else block_output
                 
                 with torch.autocast(device_type="cuda" if self.device == "cuda" else "cpu",

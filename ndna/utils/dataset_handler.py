@@ -5,10 +5,11 @@ Supports HuggingFace datasets, custom datasets, and text prompts.
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from datasets import load_dataset, Dataset as HFDataset
-from typing import List, Dict, Union, Optional, Callable, Any
+from datasets import load_dataset, Dataset as HFDataset, IterableDataset
+from typing import List, Dict, Union, Optional, Callable, Any, Iterator
 import pandas as pd
 import json
+import itertools
 
 
 class TextDataset(Dataset):
@@ -27,6 +28,7 @@ class TextDataset(Dataset):
 class DatasetHandler:
     """
     Flexible dataset handler that can process various data sources and formats.
+    Supports both regular and streaming datasets for memory efficiency.
     
     Recommended datasets (no config required):
     - "imdb": Movie reviews  
@@ -38,6 +40,7 @@ class DatasetHandler:
     - "wikitext": Use config='wikitext-2-raw-v1' or 'wikitext-103-raw-v1'
     - "glue": Use config='sst2', 'cola', 'mrpc', etc.
     - "super_glue": Use config='boolq', 'cb', 'copa', etc.
+    - "DataProvenanceInitiative/flan2021_submix_original": Large instruction dataset
     """
     
     def __init__(self, 
@@ -60,6 +63,8 @@ class DatasetHandler:
         self.num_workers = num_workers
         self.dataset = None
         self.dataloader = None
+        self.is_streaming = False
+        self.stream_iterator = None
     
     def load_from_huggingface(self, 
                               dataset_name: str, 
@@ -213,6 +218,98 @@ class DatasetHandler:
             raise ValueError(f"Unsupported format: {file_format}")
         
         return self.load_from_texts(texts)
+    
+    def load_streaming_dataset(self, 
+                              dataset_name: str,
+                              split: str = "train", 
+                              text_column: str = "text",
+                              max_samples: Optional[int] = None,
+                              text_processor: Optional[Callable] = None,
+                              config_name: Optional[str] = None,
+                              filter_function: Optional[Callable] = None) -> 'DatasetHandler':
+        """
+        Load dataset as a streaming dataset to avoid memory issues with large datasets.
+        
+        Args:
+            dataset_name: HuggingFace dataset identifier
+            split: Dataset split to use
+            text_column: Column name containing text data 
+            max_samples: Maximum number of samples to process
+            text_processor: Optional function to process text examples
+            config_name: Optional config name for datasets with multiple configs
+            filter_function: Optional function to filter examples (e.g., by task_name)
+            
+        Returns:
+            Self for method chaining
+        """
+        print(f"Loading streaming dataset: {dataset_name} (split: {split})")
+        
+        try:
+            if config_name:
+                ds = load_dataset(dataset_name, config_name, split=split, streaming=True)
+            else:
+                ds = load_dataset(dataset_name, split=split, streaming=True)
+        except Exception as e:
+            raise ValueError(f"Could not load streaming dataset {dataset_name}. Error: {e}")
+            
+        # Apply filters if provided
+        if filter_function:
+            ds = ds.filter(filter_function)
+            
+        # Apply text processor if provided
+        if text_processor:
+            ds = ds.map(text_processor)
+            
+        self.dataset = ds
+        self.is_streaming = True
+        print(f"✅ Streaming dataset loaded: {dataset_name}")
+        
+        return self
+    
+    def get_streaming_texts(self, max_samples: Optional[int] = None) -> Iterator[str]:
+        """
+        Generator that yields text samples from streaming dataset.
+        
+        Args:
+            max_samples: Maximum number of samples to yield
+            
+        Yields:
+            Text strings from the dataset
+        """
+        if not self.is_streaming or self.dataset is None:
+            raise ValueError("No streaming dataset loaded. Use load_streaming_dataset() first.")
+            
+        count = 0
+        for example in self.dataset:
+            # Extract text based on expected structure
+            if isinstance(example, dict):
+                if 'inputs' in example and 'targets' in example:
+                    # FLAN format
+                    text = f"{example['inputs']}\n{example['targets']}"
+                elif 'text' in example:
+                    text = example['text']
+                else:
+                    # Try to find a reasonable text field
+                    text_fields = ['content', 'sentence', 'prompt', 'input']
+                    text = None
+                    for field in text_fields:
+                        if field in example and example[field]:
+                            text = str(example[field])
+                            break
+                    
+                    if text is None:
+                        # Fallback to string representation
+                        text = str(example)
+            else:
+                text = str(example)
+            
+            # Filter short texts
+            if len(text.strip()) > 10:
+                yield text.strip()
+                count += 1
+                
+                if max_samples and count >= max_samples:
+                    break
     
     def create_dataloader(self, 
                           shuffle: bool = False,
